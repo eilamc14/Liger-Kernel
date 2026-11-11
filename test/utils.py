@@ -844,7 +844,7 @@ def revert_liger_kernel_to_qwen4_exp(model_config: MiniModelConfig):
 
     # Reload to unpatch liger kernel code
     importlib.reload(modeling_qwen4_exp)
-    model_config.model_class = modeling_qwen4_exp.Qwen4ExpForCausalLM
+    model_config.model_class = getattr(modeling_qwen4_exp, model_config.model_class.__name__)
 
 
 def revert_liger_kernel_to_qwen3_next(model_config: MiniModelConfig):

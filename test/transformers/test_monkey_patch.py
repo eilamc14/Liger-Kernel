@@ -3749,6 +3749,62 @@ def test_apply_liger_kernel_to_instance_for_qwen4_exp():
 
 
 @pytest.mark.skipif(not is_qwen4_exp_available(), reason="qwen4_exp module not available")
+@pytest.mark.usefixtures("qwen4_exp_globals")
+def test_apply_liger_kernel_to_instance_for_qwen4_exp_for_conditional_generation():
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForConditionalGeneration
+
+    from liger_kernel.transformers.model.qwen4_exp import lce_forward_conditional_generation
+    from liger_kernel.transformers.qwen4_exp import liger_qwen4_exp_experts_forward
+    from liger_kernel.transformers.qwen4_exp import liger_qwen4_exp_mlp_forward
+
+    # The class checkpoints with a vision_config load as (e.g. Qwen3.8-Flash-Next)
+    text_config = _qwen4_exp_compat_config()
+    vision_config = Qwen4ExpVisionConfig(
+        depth=1,
+        hidden_size=32,
+        intermediate_size=64,
+        num_heads=2,
+        out_hidden_size=text_config.hidden_size,
+        num_position_embeddings=16,
+    )
+    config = Qwen4ExpConfig(text_config=text_config.to_dict(), vision_config=vision_config.to_dict())
+    dummy_model_instance = Qwen4ExpForConditionalGeneration._from_config(config)
+    language_model = dummy_model_instance.model.language_model
+
+    def modules_named(model, name):
+        return [module for module in model.modules() if type(module).__name__ == name]
+
+    def vision_state(model):
+        return [(name, type(module), "forward" in vars(module)) for name, module in model.model.visual.named_modules()]
+
+    native_vision_state = vision_state(dummy_model_instance)
+    assert inspect.getsource(dummy_model_instance.forward) != inspect.getsource(lce_forward_conditional_generation)
+
+    # Dispatched by the composite config's model_type, as Trainer(use_liger_kernel=True) does
+    _apply_liger_kernel_to_instance(model=dummy_model_instance)
+
+    assert dummy_model_instance.forward.__func__ is lce_forward_conditional_generation
+    assert len(modules_named(language_model, "Qwen4ExpTextRMSNorm")) > 0
+    for norm in modules_named(language_model, "Qwen4ExpTextRMSNorm"):
+        assert inspect.getsource(norm.forward) == inspect.getsource(LigerRMSNorm.forward)
+    assert len(modules_named(language_model, "Qwen4ExpTextMLP")) > 0
+    for mlp in modules_named(language_model, "Qwen4ExpTextMLP"):
+        assert inspect.getsource(mlp.forward) == inspect.getsource(liger_qwen4_exp_mlp_forward)
+    assert len(modules_named(language_model, "Qwen4ExpTextExperts")) > 0
+    for experts in modules_named(language_model, "Qwen4ExpTextExperts"):
+        assert inspect.getsource(experts.forward) == inspect.getsource(liger_qwen4_exp_experts_forward)
+    # The vision tower is left alone
+    assert vision_state(dummy_model_instance) == native_vision_state
+
+    try:
+        print(dummy_model_instance)
+    except Exception as e:
+        pytest.fail(f"An exception occured in extra_expr: {type(e).__name__} - {e}")
+
+
+@pytest.mark.skipif(not is_qwen4_exp_available(), reason="qwen4_exp module not available")
 @pytest.mark.parametrize("patch_before_construction", [False, True], ids=["instance", "global"])
 @pytest.mark.usefixtures("qwen4_exp_globals")
 def test_qwen4_exp_grouped_rms_norm_falls_back_for_historical_backend_abi(monkeypatch, patch_before_construction):

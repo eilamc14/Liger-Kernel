@@ -20,6 +20,7 @@ def qwen4_exp_globals():
         "Qwen4ExpTextGatedResidual",
         "Qwen4ExpTextDecoderLayer",
         "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
     )
     classes = {name: getattr(modeling_qwen4_exp, name) for name in names}
     attributes = {cls: dict(vars(cls)) for cls in classes.values()}

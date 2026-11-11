@@ -335,7 +335,10 @@ except ImportError:
     QWEN3NEXT_AVAILABLE = False
 
 try:
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForConditionalGeneration
 
     QWEN4EXP_AVAILABLE = True
 except ImportError:
@@ -1580,6 +1583,30 @@ if QWEN4EXP_AVAILABLE:
             make_ngram_vocab_size_divisible_by=128,
         ),
     )
+    # The class checkpoints with a vision_config load as (e.g. Qwen3.8-Flash-Next), trained on text
+    MINI_MODEL_SETUPS["mini_qwen4_exp_conditional_generation"] = MiniModelConfig(
+        liger_kernel_patch_func=apply_liger_kernel_to_qwen4_exp,
+        liger_kernel_patch_revert_func=revert_liger_kernel_to_qwen4_exp,
+        model_class=Qwen4ExpForConditionalGeneration,
+        mini_model_config=Qwen4ExpConfig(
+            text_config=get_qwen4_exp_mini_config(
+                ple_layer_ids=[1],
+                ple_embed_dim=32,
+                ngram_size=2,
+                heads_per_ngram=2,
+                ngram_vocab_size_base=31,
+                make_ngram_vocab_size_divisible_by=128,
+            ).to_dict(),
+            vision_config=Qwen4ExpVisionConfig(
+                depth=1,
+                hidden_size=64,
+                intermediate_size=128,
+                num_heads=2,
+                out_hidden_size=256,
+                num_position_embeddings=16,
+            ).to_dict(),
+        ),
+    )
 
 if QWEN3NEXT_AVAILABLE:
     MINI_MODEL_SETUPS["mini_qwen3_next"] = MiniModelConfig(
@@ -2512,6 +2539,25 @@ def run_mini_model(
         ),
         pytest.param(
             "mini_qwen4_exp",
+            32,
+            1e-5,
+            torch.bfloat16,
+            1e-2,
+            1e-2,
+            1e-1,
+            1e-1,
+            1e-2,
+            1e-2,
+            marks=[
+                pytest.mark.skipif(not supports_bfloat16(), reason="bfloat16 not supported on this GPU"),
+                pytest.mark.skipif(
+                    not QWEN4EXP_AVAILABLE,
+                    reason="Qwen4Exp not available in this version of transformers",
+                ),
+            ],
+        ),
+        pytest.param(
+            "mini_qwen4_exp_conditional_generation",
             32,
             1e-5,
             torch.bfloat16,

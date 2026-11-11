@@ -168,8 +168,9 @@ def test_qwen4_exp_auto_liger_loads_composite_config_text_model(monkeypatch, tmp
     assert model.config.model_type == "qwen4_exp_text"
     assert model.forward.__func__ is lce_forward
     assert isinstance(model.model.layers[0].attn_hyper_connection.hc_norm, LigerRMSNormForQwen4Exp)
-    # Causal-LM config resolution must not advertise support for multimodal instances.
-    assert "qwen4_exp" not in MODEL_TYPE_TO_APPLY_LIGER_FN
+    # The composite config's own type dispatches to the same applier, which also handles
+    # Qwen4ExpForConditionalGeneration instances.
+    assert MODEL_TYPE_TO_APPLY_LIGER_FN["qwen4_exp"] is apply_liger_kernel_to_qwen4_exp
 
 
 @requires_nvidia
@@ -988,3 +989,69 @@ def test_qwen4_exp_fused_lce_declines_global_module_hooks(hook_type):
         handle.remove()
 
     assert _can_use_fused_lce_lm_head(candidate.lm_head, hidden_states)
+
+
+@requires_nvidia
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float32, 1e-5, 1e-5),
+        pytest.param(
+            torch.bfloat16,
+            1e-2,
+            1e-2,
+            marks=pytest.mark.skipif(not supports_bfloat16(), reason="bfloat16 not supported on this GPU"),
+        ),
+    ],
+    ids=["fp32", "bf16"],
+)
+def test_qwen4_exp_conditional_generation_lce_matches_native(dtype, atol, rtol):
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpVisionConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForConditionalGeneration
+
+    from liger_kernel.transformers.model.qwen4_exp import lce_forward_conditional_generation
+
+    torch.manual_seed(29)
+    text_config = _tiny_config()
+    vision_config = Qwen4ExpVisionConfig(
+        depth=1,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=2,
+        out_hidden_size=text_config.hidden_size,
+        num_position_embeddings=16,
+    )
+    config = Qwen4ExpConfig(text_config=text_config.to_dict(), vision_config=vision_config.to_dict())
+    reference = Qwen4ExpForConditionalGeneration(config).to(device, dtype)
+    candidate = copy.deepcopy(reference)
+    candidate.forward = MethodType(lce_forward_conditional_generation, candidate)
+
+    input_ids = torch.randint(0, text_config.vocab_size, (2, 24), device=device)
+    labels = input_ids.clone()
+    labels[:, :5] = -100
+
+    # Training: the fused path computes the loss without materializing logits
+    reference.train()
+    candidate.train()
+    expected = reference(input_ids=input_ids, labels=labels, use_cache=False)
+    actual = candidate(input_ids=input_ids, labels=labels, use_cache=False)
+    assert actual.logits is None
+    assert (actual.rope_deltas is None) == (expected.rope_deltas is None)
+    assert_verbose_allclose(actual.loss, expected.loss, atol=atol, rtol=rtol)
+    expected.loss.backward()
+    actual.loss.backward()
+    for (name, expected_param), actual_param in zip(reference.named_parameters(), candidate.parameters()):
+        if expected_param.grad is None:
+            assert actual_param.grad is None, name
+            continue
+        assert_verbose_allclose(actual_param.grad, expected_param.grad, atol=atol, rtol=rtol)
+
+    # Evaluation: logits are materialized and match the native forward exactly
+    reference.eval()
+    candidate.eval()
+    with torch.no_grad():
+        expected = reference(input_ids=input_ids, labels=labels, use_cache=False)
+        actual = candidate(input_ids=input_ids, labels=labels, use_cache=False)
+    assert_verbose_allclose(actual.logits, expected.logits, atol=0.0, rtol=0.0)
+    assert_verbose_allclose(actual.loss, expected.loss, atol=0.0, rtol=0.0)

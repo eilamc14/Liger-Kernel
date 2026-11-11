@@ -99,6 +99,13 @@ try:
 except Exception:
     _Qwen3_5MoeCausalLMOutputWithPast = None
 
+try:
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+        Qwen4ExpCausalLMOutputWithPast as _Qwen4ExpCausalLMOutputWithPast,
+    )
+except Exception:
+    _Qwen4ExpCausalLMOutputWithPast = None
+
 
 @dataclass
 class LigerCausalLMOutputWithPast(CausalLMOutputWithPast):
@@ -212,5 +219,13 @@ if _Qwen3_5MoeCausalLMOutputWithPast is not None:
 
     @dataclass
     class LigerQwen3_5MoeCausalLMOutputWithPast(_Qwen3_5MoeCausalLMOutputWithPast):
+        token_accuracy: Optional[torch.FloatTensor] = None
+        predicted_tokens: Optional[torch.LongTensor] = None
+
+
+if _Qwen4ExpCausalLMOutputWithPast is not None:
+
+    @dataclass
+    class LigerQwen4ExpCausalLMOutputWithPast(_Qwen4ExpCausalLMOutputWithPast):
         token_accuracy: Optional[torch.FloatTensor] = None
         predicted_tokens: Optional[torch.LongTensor] = None

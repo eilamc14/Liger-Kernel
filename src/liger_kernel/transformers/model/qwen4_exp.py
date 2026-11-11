@@ -140,3 +140,120 @@ def lce_forward(
         token_accuracy=token_accuracy,
         predicted_tokens=predicted_tokens,
     )
+
+
+@can_return_tuple
+def lce_forward_conditional_generation(
+    self,
+    input_ids: Optional[torch.LongTensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Cache | None = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    pixel_values: Optional[torch.Tensor] = None,
+    pixel_values_videos: Optional[torch.FloatTensor] = None,
+    image_grid_thw: Optional[torch.LongTensor] = None,
+    video_grid_thw: Optional[torch.LongTensor] = None,
+    mm_token_type_ids: Optional[torch.IntTensor] = None,
+    output_router_logits: Optional[bool] = None,
+    logits_to_keep: Union[int, torch.Tensor] = 0,
+    mm_encoder_outputs: Optional[dict] = None,
+    *,
+    skip_logits: Optional[bool] = None,
+    **kwargs,
+):
+    r"""
+    ``Qwen4ExpForConditionalGeneration`` forward with fused linear cross entropy support.
+
+    This is the class released checkpoints with a ``vision_config`` load as (e.g. Qwen3.8-Flash-Next).
+    It sets ``accepts_loss_kwargs = False``, so the loss reduces by mean, like the native forward.
+    """
+    from liger_kernel.transformers.model.output_classes import LigerQwen4ExpCausalLMOutputWithPast
+
+    shift_labels = kwargs.pop("shift_labels", None)
+    if skip_logits and labels is None and shift_labels is None:
+        raise ValueError("skip_logits is True, but labels and shift_labels are None")
+
+    text_config = self.config.text_config
+    if output_router_logits is None:
+        output_router_logits = getattr(text_config, "output_router_logits", False)
+    if mm_encoder_outputs is not None:
+        kwargs["mm_encoder_outputs"] = mm_encoder_outputs
+
+    outputs = self.model(
+        input_ids=input_ids,
+        pixel_values=pixel_values,
+        pixel_values_videos=pixel_values_videos,
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
+        mm_token_type_ids=mm_token_type_ids,
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        output_router_logits=output_router_logits,
+        return_dict=True,
+        **kwargs,
+    )
+
+    hidden_states = outputs.last_hidden_state
+    # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+    slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+    kept_hidden_states = hidden_states[:, slice_indices, :]
+
+    logits = None
+    loss = None
+    token_accuracy = None
+    predicted_tokens = None
+
+    if skip_logits is None:
+        skip_logits = self.training and (labels is not None or shift_labels is not None)
+
+    if skip_logits and _can_use_fused_lce_lm_head(self.lm_head, kept_hidden_states):
+        result = LigerForCausalLMLoss(
+            hidden_states=kept_hidden_states,
+            lm_head_weight=self.lm_head.weight,
+            labels=labels,
+            shift_labels=shift_labels,
+            hidden_size=text_config.hidden_size,
+            **kwargs,
+        )
+        loss, _, token_accuracy, predicted_tokens = unpack_cross_entropy_result(result)
+    else:  # if in inference model materialize logits
+        logits = self.lm_head(kept_hidden_states)
+        if labels is not None or shift_labels is not None:
+            loss = self.loss_function(
+                logits=logits,
+                labels=labels,
+                shift_labels=shift_labels,
+                vocab_size=text_config.vocab_size,
+                **kwargs,
+            )
+
+    aux_loss = None
+    if output_router_logits:
+        from transformers.models.qwen4_exp.modeling_qwen4_exp import load_balancing_loss_func
+
+        aux_loss = load_balancing_loss_func(
+            outputs.router_logits,
+            text_config.num_experts,
+            text_config.num_experts_per_tok,
+            attention_mask,
+        )
+        if labels is not None or shift_labels is not None:
+            # make sure to reside in the same device
+            loss += text_config.router_aux_loss_coef * aux_loss.to(loss.device)
+
+    return LigerQwen4ExpCausalLMOutputWithPast(
+        loss=loss,
+        aux_loss=aux_loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+        rope_deltas=outputs.rope_deltas,
+        router_logits=outputs.router_logits,
+        token_accuracy=token_accuracy,
+        predicted_tokens=predicted_tokens,
+    )

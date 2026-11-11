@@ -3235,9 +3235,9 @@ def apply_liger_kernel_to_qwen4_exp(
     model: PreTrainedModel = None,
 ) -> None:
     """
-    Apply Liger kernels to the text stack of HuggingFace Qwen4Exp models. Only
-    ``Qwen4ExpForCausalLM`` / ``Qwen4ExpTextModel`` are supported; the multimodal composite
-    (``Qwen4ExpForConditionalGeneration``) is out of scope.
+    Apply Liger kernels to the text stack of HuggingFace Qwen4Exp models: ``Qwen4ExpForCausalLM``,
+    ``Qwen4ExpTextModel``, and the multimodal composite ``Qwen4ExpForConditionalGeneration`` (the
+    class checkpoints with a ``vision_config`` load as). The vision tower is left untouched.
 
     Patched components:
       - RMSNorm: ordinary norms use the selected Liger backend. Grouped norms used by Gated
@@ -3269,8 +3269,8 @@ def apply_liger_kernel_to_qwen4_exp(
             Whether to apply Liger's fused linear cross entropy loss. Default is True.
             `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
             If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
-            This option applies only to ``Qwen4ExpForCausalLM`` and is ignored for ``Qwen4ExpTextModel``,
-            which has no LM head.
+            This option applies to ``Qwen4ExpForCausalLM`` and ``Qwen4ExpForConditionalGeneration`` and is
+            ignored for ``Qwen4ExpTextModel``, which has no LM head.
         rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
         swiglu (bool): Whether to enable guarded Liger SwiGLU MLP / fused MoE experts. SiLU/Swish
             uses Liger, while unsupported activations remain native. Explicit non-eager Hugging Face
@@ -3295,6 +3295,7 @@ def apply_liger_kernel_to_qwen4_exp(
 
     from transformers.models.qwen4_exp import modeling_qwen4_exp
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForConditionalGeneration
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextDecoderLayer
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextExperts
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextGatedResidual
@@ -3305,6 +3306,9 @@ def apply_liger_kernel_to_qwen4_exp(
 
     from liger_kernel.ops.utils import is_hip
     from liger_kernel.transformers.model.qwen4_exp import lce_forward as qwen4_exp_lce_forward
+    from liger_kernel.transformers.model.qwen4_exp import (
+        lce_forward_conditional_generation as qwen4_exp_conditional_generation_lce_forward,
+    )
     from liger_kernel.transformers.qwen4_exp import patch_qwen4_exp_text_hyper_connection_classes
     from liger_kernel.transformers.qwen4_exp import patch_qwen4_exp_text_module_for_hyper_connection
     from liger_kernel.transformers.qwen4_exp import patch_qwen4_exp_text_module_for_ngram
@@ -3333,11 +3337,12 @@ def apply_liger_kernel_to_qwen4_exp(
     use_liger_ngram = engram and supports_qwen4_exp_cuda_kernels
     use_liger_hyper_connection = hyper_connection and supports_qwen4_exp_cuda_kernels
 
-    if model is not None and not isinstance(model, (Qwen4ExpForCausalLM, Qwen4ExpTextModel)):
+    if model is not None and not isinstance(
+        model, (Qwen4ExpForCausalLM, Qwen4ExpForConditionalGeneration, Qwen4ExpTextModel)
+    ):
         raise TypeError(
-            "Unsupported qwen4_exp model type. `model` must be `Qwen4ExpForCausalLM` or `Qwen4ExpTextModel`. "
-            f"Got: {type(model)}. The multimodal `Qwen4ExpForConditionalGeneration` composite is not "
-            "supported yet; load the text model via `AutoModelForCausalLM` instead."
+            "Unsupported qwen4_exp model type. `model` must be `Qwen4ExpForCausalLM`, "
+            f"`Qwen4ExpForConditionalGeneration` or `Qwen4ExpTextModel`. Got: {type(model)}."
         )
 
     config = None if model is None else model.config.get_text_config()
@@ -3386,8 +3391,11 @@ def apply_liger_kernel_to_qwen4_exp(
         if model is not None:
             if isinstance(model, Qwen4ExpForCausalLM):
                 _bind_forward_to_module(model, qwen4_exp_lce_forward)
+            elif isinstance(model, Qwen4ExpForConditionalGeneration):
+                _bind_forward_to_module(model, qwen4_exp_conditional_generation_lce_forward)
         else:
             modeling_qwen4_exp.Qwen4ExpForCausalLM.forward = qwen4_exp_lce_forward
+            modeling_qwen4_exp.Qwen4ExpForConditionalGeneration.forward = qwen4_exp_conditional_generation_lce_forward
 
     if model is not None:
         # The model instance already exists, so we need to additionally patch the
@@ -3939,6 +3947,7 @@ MODEL_TYPE_TO_APPLY_LIGER_FN = {
     "qwen3_vl_text": apply_liger_kernel_to_qwen3_vl,
     "qwen3_vl_moe": apply_liger_kernel_to_qwen3_vl_moe,
     "qwen3_vl_moe_text": apply_liger_kernel_to_qwen3_vl_moe,
+    "qwen4_exp": apply_liger_kernel_to_qwen4_exp,
     "qwen4_exp_text": apply_liger_kernel_to_qwen4_exp,
     "smollm3": apply_liger_kernel_to_smollm3,
     "phi3": apply_liger_kernel_to_phi3,
